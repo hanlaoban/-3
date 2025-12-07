@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web AR: Math & Magic (Debug Mode)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Consolas', monospace; color: white; }
+        
+        /* 调试日志 (左上角) */
+        #debug-console {
+            position: fixed; top: 0; left: 0; width: 100%; padding: 10px;
+            background: rgba(0,0,0,0.5); color: #0f0; font-size: 12px;
+            pointer-events: none; z-index: 10000; text-shadow: 1px 1px 1px black;
+        }
+
+        /* 视频层 */
+        #video-feed {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover;
+            transform: scaleX(-1); filter: grayscale(100%) contrast(1.2) brightness(0.6); z-index: 0;
+            display: none; /* 启动后显示 */
+        }
+
+        /* 3D 画布 */
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; pointer-events: none; }
+        
+        /* 骨骼画布 */
+        #skeleton-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
+
+        /* UI 面板 */
+        #ui-layer {
+            position: absolute; top: 50px; left: 0; width: 100%; height: 100%; z-index: 3; pointer-events: none;
+            padding: 20px; display: none;
+        }
+        .hud-panel {
+            background: rgba(0, 0, 0, 0.8); border: 1px solid #fff; border-left: 4px solid #0ff;
+            padding: 15px; width: 280px; pointer-events: auto;
+        }
+        .stat-row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 5px; color: #aaa; }
+        .val { color: #0ff; font-weight: bold; }
+
+        /* 启动画面 */
+        #boot-screen {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+            background: #000; z-index: 5000; display: flex; flex-direction: column; 
+            align-items: center; justify-content: center;
+        }
+        #boot-btn {
+            background: transparent; border: 2px solid #0ff; color: #0ff; padding: 15px 30px;
+            font-size: 18px; cursor: pointer; margin-top: 20px; font-family: monospace;
+            transition: 0.3s;
+        }
+        #boot-btn:hover { background: #0ff; color: #000; }
+        #boot-btn:disabled { border-color: #555; color: #555; cursor: not-allowed; }
+
+        /* 闪光特效 */
+        #flash { position: fixed; top:0; left:0; width:100%; height:100%; bg:white; opacity:0; pointer-events:none; z-index:4000; transition:opacity 0.1s; background: white;}
+    </style>
+</head>
+<body>
+
+    <!-- 调试控制台 -->
+    <div id="debug-console">SYSTEM LOG STARTED...<br></div>
+
+    <!-- 启动屏 -->
+    <div id="boot-screen">
+        <h1 style="color:#0ff; text-shadow:0 0 10px #0ff;">MATH x MAGIC AR</h1>
+        <div id="loading-status" style="color:#888; margin-top:10px;">LOADING LIBRARIES...</div>
+        <button id="boot-btn" onclick="startSystem()" disabled>INITIALIZING...</button>
+        <div style="font-size:10px; color:#555; margin-top:20px;">If stuck, check VPN or Network</div>
+    </div>
+
+    <video id="video-feed" playsinline></video>
+    <canvas id="skeleton-canvas"></canvas>
+    <div id="canvas-container"></div>
+    <div id="flash"></div>
+
+    <div id="ui-layer">
+        <div class="hud-panel">
+            <h3 style="margin:0 0 10px 0; color:white; border-bottom:1px solid #555; padding-bottom:5px;">SUMMONER STATS</h3>
+            <div class="stat-row"><span>SYSTEM:</span> <span class="val" id="sys-status">ONLINE</span></div>
+            <div class="stat-row"><span>CURVE:</span> <span class="val" id="curve-val">VOID</span></div>
+            <div class="stat-row"><span>ENTITY:</span> <span class="val" id="entity-val">NONE</span></div>
+            <div class="stat-row"><span>GESTURE:</span> <span class="val" id="gesture-val">SCANNING</span></div>
+            <div style="margin-top:10px; border-top:1px solid #333; padding-top:5px; font-size:10px; color:#666;">
+                [FIST] SUMMON / [PINCH] ROTATE / [HOVER] PHYSICS
+            </div>
+            <label style="display:block; margin-top:10px; border:1px solid #444; text-align:center; padding:5px; cursor:pointer; font-size:10px; color:#888;">
+                UPLOAD IMAGE <input type="file" id="upload-img" accept="image/*" style="display:none">
+            </label>
+        </div>
+    </div>
+
+    <!-- 脚本引入放在底部，防止阻塞页面渲染 -->
+    <script>
+        function log(msg, isError=false) {
+            const c = document.getElementById('debug-console');
+            c.innerHTML += (isError ? "<span style='color:red'>[ERR] " : "[OK] ") + msg + "</span><br>";
+            if(isError) console.error(msg); else console.log(msg);
+        }
+        window.onerror = function(msg, source, lineno) {
+            log(msg + " (Line " + lineno + ")", true);
+        };
+    </script>
+
+    <!-- 1. Three.js (CDNJS) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" onload="log('Three.js Loaded')" onerror="log('Three.js FAILED', true)"></script>
+    
+    <!-- 2. PostProcessing (Unpkg - 必要风险，但通常较小) -->
+    <script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+    <script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+    <script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+    <script src="https://unpkg.com/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+    <script src="https://unpkg.com/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+    <script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+
+    <!-- 3. GUI -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.7/dat.gui.min.js"></script>
+
+    <!-- 4. MediaPipe (JSDelivr) -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous" onload="log('MediaPipe Lib Loaded')" onerror="log('MediaPipe FAILED', true)"></script>
+
+    <script>
+        // --- 容错检测逻辑 ---
+        const btn = document.getElementById('boot-btn');
+        const status = document.getElementById('loading-status');
+        
+        let checkInterval = setInterval(() => {
+            if (typeof THREE !== 'undefined' && typeof Hands !== 'undefined') {
+                clearInterval(checkInterval);
+                btn.disabled = false;
+                btn.innerText = "[ START SYSTEM ]";
+                status.innerText = "MODULES READY.";
+                log("All Modules Ready. Waiting for user start.");
+            }
+        }, 500);
+
+        // 5秒强制激活（防止检测失败）
+        setTimeout(() => {
+            if(btn.disabled) {
+                btn.disabled = false;
+                btn.innerText = "[ FORCE START ]";
+                log("Force enabling button (Timeout).", true);
+            }
+        }, 5000);
+
+        // --- 系统核心 ---
+        let scene, camera, renderer, composer;
+        let magicEngine, charEngine;
+        let clock = new THREE.Clock();
+        let handLandmarks = null;
+        let lastSummon = 0;
+
+        async function startSystem() {
+            btn.style.display = 'none';
+            status.innerText = "STARTING CAMERA... ALLOW PERMISSIONS";
+            
+            try {
+                initThree();
+                await initMediaPipe();
+                
+                document.getElementById('boot-screen').style.display = 'none';
+                document.getElementById('video-feed').style.display = 'block';
+                document.getElementById('ui-layer').style.display = 'block';
+                log("System Active.");
+            } catch (e) {
+                log("CRITICAL START ERROR: " + e.message, true);
+                status.innerText = "ERROR: " + e.message;
+            }
+        }
+
+        // 1. 3D 初始化
+        function initThree() {
+            const container = document.getElementById('canvas-container');
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 100);
+            camera.position.set(0, 1.5, 5);
+
+            renderer = new THREE.WebGLRenderer({ alpha: true, antialias: false });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            container.appendChild(renderer.domElement);
+
+            // 辉光
+            const renderPass = new THREE.RenderPass(scene, camera);
+            const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+            bloomPass.threshold = 0.1;
+            bloomPass.strength = 1.2;
+            bloomPass.radius = 0.5;
+            
+            composer = new THREE.EffectComposer(renderer);
+            composer.addPass(renderPass);
+            composer.addPass(bloomPass);
+
+            // GUI
+            if(typeof dat !== 'undefined') {
+                const gui = new dat.GUI();
+                const f = gui.addFolder('Settings');
+                f.add(bloomPass, 'strength', 0, 3).name('Glow');
+                f.open();
+            }
+
+            // 启动引擎
+            magicEngine = new MagicCurveEngine();
+            charEngine = new VoxelCharEngine();
+            charEngine.summon('raiden'); // 默认
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth/window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                composer.setSize(window.innerWidth, window.innerHeight);
+                const sk = document.getElementById('skeleton-canvas');
+                sk.width = window.innerWidth; sk.height = window.innerHeight;
+            });
+
+            animate();
+        }
+
+        // 2. 数学曲线引擎
+        class MagicCurveEngine {
+            constructor() {
+                this.count = 30000;
+                this.geo = new THREE.BufferGeometry();
+                this.pos = new Float32Array(this.count*3);
+                this.col = new Float32Array(this.count*3);
+                this.target = new Float32Array(this.count*3);
+                
+                // 纹理
+                const c = document.createElement('canvas'); c.width=32; c.height=32;
+                const ctx = c.getContext('2d'); ctx.fillStyle='#0ff'; ctx.font='20px monospace'; ctx.fillText('+', 8, 20);
+                const tex = new THREE.CanvasTexture(c);
+
+                const mat = new THREE.PointsMaterial({
+                    size: 0.05, map: tex, transparent: true, blending: THREE.AdditiveBlending, vertexColors: true, depthWrite: false
+                });
+
+                this.mesh = new THREE.Points(this.geo, mat);
+                this.mesh.position.y = -2;
+                scene.add(this.mesh);
+                
+                // Init
+                for(let i=0; i<this.count*3; i++) { this.pos[i]=0; this.target[i]=0; this.col[i]=1; }
+                this.morph('lemniscate');
+            }
+
+            getCurvePoint(type, t) {
+                const a = t * Math.PI * 20; // Angle
+                let x=0, y=0, z=0;
+                
+                if(type === 'butterfly') {
+                    const th = t * Math.PI * 4;
+                    const r = Math.exp(Math.cos(th)) - 2*Math.cos(4*th) + Math.pow(Math.sin(th/12), 5);
+                    x = r*Math.sin(th)*2; z = r*Math.cos(th)*2; y = Math.random()*0.2;
+                } else if(type === 'archimedes') {
+                    const r = 0.2 * a; x = r*Math.cos(a); z = r*Math.sin(a); y = Math.sin(a*2)*0.2;
+                } else if(type === 'lemniscate') {
+                    const th = t * Math.PI * 2; const den = 1+Math.sin(th)**2;
+                    x = 4*Math.cos(th)/den; z = 4*Math.sin(th)*Math.cos(th)/den; y = (Math.random()-0.5)*0.5;
+                } else if(type === 'rose') {
+                    const k=4; const r=3*Math.cos(k*a); x=r*Math.cos(a); z=r*Math.sin(a); y=(t-0.5);
+                } else { // Catenary/Random
+                    const u = (t-0.5)*4; x=Math.cosh(u)*Math.cos(a); z=Math.cosh(u)*Math.sin(a); y=u;
+                }
+                return {x,y,z};
+            }
+
+            morph(type) {
+                document.getElementById('curve-val').innerText = type.toUpperCase();
+                const colors = {'butterfly':[1,0.2,0.5], 'archimedes':[0,1,1], 'lemniscate':[0.2,0.5,1], 'rose':[1,0,0]};
+                const col = colors[type] || [1,1,1];
+
+                for(let i=0; i<this.count; i++) {
+                    const p = this.getCurvePoint(type, i/this.count);
+                    this.target[i*3] = p.x; this.target[i*3+1] = p.y; this.target[i*3+2] = p.z;
+                    this.col[i*3]=col[0]; this.col[i*3+1]=col[1]; this.col[i*3+2]=col[2];
+                }
+                this.geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
+                this.geo.setAttribute('color', new THREE.BufferAttribute(this.col, 3));
+                this.geo.attributes.color.needsUpdate = true;
+            }
+
+            update(dt) {
+                this.mesh.rotation.y += dt*0.2;
+                const pos = this.geo.attributes.position.array;
+                for(let i=0; i<this.count*3; i++) {
+                    pos[i] += (this.target[i] - pos[i]) * 3 * dt;
+                }
+                this.geo.attributes.position.needsUpdate = true;
+            }
+        }
+
+        // 3. 真3D人物引擎
+        class VoxelCharEngine {
+            constructor() {
+                this.max = 30000;
+                this.geo = new THREE.BufferGeometry();
+                this.pos = new Float32Array(this.max*3);
+                this.col = new Float32Array(this.max*3);
+                this.dest = new Float32Array(this.max*3);
+                
+                // 初始化散开
+                for(let i=0; i<this.max*3; i++) { this.pos[i] = (Math.random()-0.5)*10; this.dest[i] = 999; }
+                
+                this.geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
+                this.geo.setAttribute('color', new THREE.BufferAttribute(this.col, 3));
+                
+                // 六边形纹理
+                const c = document.createElement('canvas'); c.width=32; c.height=32;
+                const ctx = c.getContext('2d'); ctx.strokeStyle='#fff'; ctx.beginPath();
+                for(let i=0;i<6;i++) ctx.lineTo(16+10*Math.cos(i*1.04), 16+10*Math.sin(i*1.04));
+                ctx.stroke();
+                const tex = new THREE.CanvasTexture(c);
+
+                const mat = new THREE.PointsMaterial({
+                    size: 0.06, map: tex, transparent: true, blending: THREE.AdditiveBlending, vertexColors: true, depthWrite: false
+                });
+                this.mesh = new THREE.Points(this.geo, mat);
+                scene.add(this.mesh);
+                
+                this.list = ['raiden', 'furina', 'yae'];
+            }
+
+            build(name) {
+                let ptr = 0;
+                // 简单的体积生成器
+                const add = (type, p, c) => {
+                    for(let i=0; i<2500; i++) {
+                        if(ptr>=this.max) break;
+                        let x,y,z;
+                        if(type=='cyl') { const a=Math.random()*6.28; const r=Math.sqrt(Math.random())*p.r; x=r*Math.cos(a); z=r*Math.sin(a); y=(Math.random()-0.5)*p.h; }
+                        else if(type=='sph') { const a=Math.random()*6.28; const b=Math.acos(2*Math.random()-1); const r=Math.cbrt(Math.random())*p.r; x=r*Math.sin(b)*Math.cos(a); y=r*Math.sin(b)*Math.sin(a); z=r*Math.cos(b); }
+                        else if(type=='cone') { const h=Math.random()*p.h; const r=(h/p.h)*p.r*Math.sqrt(Math.random()); const a=Math.random()*6.28; x=r*Math.cos(a); z=r*Math.sin(a); y=h-p.h/2; }
+                        
+                        // Transform
+                        if(p.rx) { const t=y*Math.cos(p.rx)-z*Math.sin(p.rx); z=y*Math.sin(p.rx)+z*Math.cos(p.rx); y=t; }
+                        x+=p.x||0; y+=p.y||0; z+=p.z||0;
+                        
+                        this.dest[ptr*3]=x; this.dest[ptr*3+1]=y; this.dest[ptr*3+2]=z;
+                        this.col[ptr*3]=c.r; this.col[ptr*3+1]=c.g; this.col[ptr*3+2]=c.b;
+                        ptr++;
+                    }
+                };
+
+                if(name=='raiden') { // Purple
+                    add('cyl', {r:0.3, h:1.2, y:0}, {r:0.5,g:0,b:1});
+                    add('sph', {r:0.35, y:0.8}, {r:0.8,g:0.6,b:1});
+                    add('cyl', {r:0.1, h:1.5, y:-0.2, z:-0.5, rx:0.3}, {r:0.3,g:0,b:0.6}); // Braid
+                } else if(name=='furina') { // Blue
+                    add('cone', {r:0.6, h:1.0, y:-0.3}, {r:0,g:0.2,b:0.8});
+                    add('sph', {r:0.3, y:0.9}, {r:1,g:0.9,b:0.8});
+                    add('cyl', {r:0.5, h:0.05, y:1.1}, {r:0,g:0.5,b:1}); // Hat
+                } else if(name=='yae') { // Pink
+                    add('cyl', {r:0.35, h:1.0, y:-0.1}, {r:1,g:1,b:1});
+                    add('sph', {r:0.35, y:0.7}, {r:1,g:0.8,b:0.8});
+                    add('cone', {r:0.15, h:0.5, y:1.1, x:-0.3}, {r:1,g:0.5,b:0.7}); // Ear
+                    add('cone', {r:0.15, h:0.5, y:1.1, x:0.3}, {r:1,g:0.5,b:0.7}); // Ear
+                }
+                
+                // Hide rest
+                for(let i=ptr*3; i<this.max*3; i++) this.dest[i] = 999;
+                this.geo.attributes.color.needsUpdate = true;
+            }
+
+            summon(name) {
+                document.getElementById('entity-val').innerText = name.toUpperCase();
+                // Explosion
+                const pos = this.geo.attributes.position.array;
+                for(let i=0; i<this.max; i++) if(pos[i*3]<500) {
+                    pos[i*3]+=(Math.random()-0.5)*5; pos[i*3+1]+=(Math.random()-0.5)*5; pos[i*3+2]+=(Math.random()-0.5)*5;
+                }
+                this.build(name);
+            }
+
+            loadImg(img) {
+                const c=document.createElement('canvas'); c.width=150; c.height=150;
+                const ctx=c.getContext('2d'); ctx.drawImage(img,0,0,150,150);
+                const d=ctx.getImageData(0,0,150,150).data;
+                let ptr=0;
+                for(let i=0; i<150*150; i++) {
+                    const idx=i*4;
+                    if(d[idx+3]>100) {
+                        const x=i%150; const y=Math.floor(i/150);
+                        const px=(x/150-0.5)*5; const py=-(y/150-0.5)*5+0.5; const pz=(d[idx]/255)*1.0;
+                        this.dest[ptr*3]=px; this.dest[ptr*3+1]=py; this.dest[ptr*3+2]=pz;
+                        this.col[ptr*3]=d[idx]/255; this.col[ptr*3+1]=d[idx+1]/255; this.col[ptr*3+2]=d[idx+2]/255;
+                        ptr++; if(ptr>=this.max) break;
+                    }
+                }
+                for(let i=ptr*3; i<this.max*3; i++) this.dest[i]=999;
+                this.geo.attributes.color.needsUpdate = true;
+            }
+
+            update(dt, hand) {
+                const pos = this.geo.attributes.position.array;
+                let hx=0,hy=0,hz=2,has=false;
+                if(hand) { hx=(hand.x-0.5)*8; hy=-(hand.y-0.5)*6; has=true; }
+                
+                for(let i=0; i<this.max; i++) {
+                    const idx=i*3; let tx=this.dest[idx];
+                    if(tx>500) { pos[idx]=999; continue; }
+                    let ty=this.dest[idx+1]; let tz=this.dest[idx+2];
+                    
+                    if(has) {
+                        const dx=pos[idx]-hx; const dy=pos[idx+1]-hy; const dz=pos[idx+2]-hz;
+                        const d2=dx*dx+dy*dy+dz*dz;
+                        if(d2<2.5) { const f=(2.5-d2)*5*dt; tx+=dx*f; ty+=dy*f; tz+=dz*f; }
+                    }
+                    pos[idx] += (tx-pos[idx])*4*dt;
+                    pos[idx+1] += (ty-pos[idx+1])*4*dt;
+                    pos[idx+2] += (tz-pos[idx+2])*4*dt;
+                }
+                this.geo.attributes.position.needsUpdate = true;
+            }
+        }
+
+        // 4. 交互
+        async function initMediaPipe() {
+            const video = document.getElementById('video-feed');
+            const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+            hands.setOptions({maxNumHands: 1, minDetectionConfidence: 0.6});
+            
+            hands.onResults((res)=>{
+                const sk = document.getElementById('skeleton-canvas');
+                const ctx = sk.getContext('2d');
+                ctx.clearRect(0,0,sk.width,sk.height);
+                
+                if(res.multiHandLandmarks && res.multiHandLandmarks.length>0) {
+                    handLandmarks = res.multiHandLandmarks[0];
+                    drawSkeleton(ctx, handLandmarks, sk.width, sk.height);
+                    
+                    const lm = handLandmarks;
+                    const d = (i,j) => Math.sqrt((lm[i].x-lm[j].x)**2 + (lm[i].y-lm[j].y)**2);
+                    const isFist = d(8,0)<0.15 && d(12,0)<0.15 && d(16,0)<0.15 && d(20,0)<0.15;
+                    const isPinch = d(4,8)<0.05;
+                    
+                    const ui = document.getElementById('gesture-val');
+                    if(isFist) {
+                        ui.innerText = "FIST";
+                        if(Date.now()-lastSummon>2000) {
+                            lastSummon=Date.now();
+                            magicEngine.morph(['butterfly','archimedes','rose','lemniscate'][Math.floor(Math.random()*4)]);
+                            charEngine.summon(['raiden','furina','yae'][Math.floor(Math.random()*3)]);
+                            const f=document.getElementById('flash'); f.style.opacity=1; setTimeout(()=>f.style.opacity=0,200);
+                        }
+                    } else if(isPinch) {
+                        ui.innerText = "PINCH";
+                        charEngine.mesh.rotation.y = (lm[8].x-0.5)*5;
+                    } else ui.innerText = "HOVER";
+
+                } else {
+                    handLandmarks = null;
+                }
+            });
+
+            const cam = new Camera(video, {
+                onFrame: async () => { await hands.send({image: video}); },
+                width: 640, height: 480
+            });
+            await cam.start();
+        }
+
+        function drawSkeleton(ctx, lm, w, h) {
+            ctx.strokeStyle='#0ff'; ctx.lineWidth=2; ctx.beginPath();
+            const pair = (a,b)=>{ctx.moveTo(lm[a].x*w, lm[a].y*h); ctx.lineTo(lm[b].x*w, lm[b].y*h);}
+            pair(0,1);pair(1,2);pair(2,3);pair(3,4); pair(0,5);pair(5,6);pair(6,7);pair(7,8);
+            pair(0,9);pair(9,10);pair(10,11);pair(11,12); pair(0,13);pair(13,14);pair(14,15);pair(15,16);
+            pair(0,17);pair(17,18);pair(18,19);pair(19,20); ctx.stroke();
+        }
+
+        document.getElementById('upload-img').addEventListener('change', (e)=>{
+            const f=e.target.files[0]; if(!f)return;
+            const r=new FileReader(); r.onload=(ev)=>{
+                const i=new Image(); i.onload=()=>{ charEngine.summon('custom'); charEngine.loadImg(i); document.getElementById('entity-val').innerText="CUSTOM"; };
+                i.src=ev.target.result;
+            }; r.readAsDataURL(f);
+        });
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = clock.getDelta();
+            if(magicEngine) magicEngine.update(dt);
+            if(charEngine) charEngine.update(dt, handLandmarks?handLandmarks[9]:null);
+            if(composer) composer.render();
+        }
+    </script>
+</body>
+</html>
